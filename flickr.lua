@@ -2,64 +2,63 @@ dt = require "darktable"
 
 local _debug = false
 
-local exported_flickr_tag = dt.tags.create("darktable|exported|flickr")
-local internal_tag_prefix = "darktable|"
-local python_path = "/usr/local/bin/python"
-
 local function split_path(path)
-    return string.match(path, "(.-)([^\\/]-%.?([^%.\\/]*))$")
+  return string.match(path, "(.-)([^\\/]-%.?([^%.\\/]*))$")
 end
 
+local function os.capture(cmd, raw)
+  local f = assert(io.popen(cmd, 'r'))
+  local s = assert(f:read('*a'))
+  f:close()
+  if raw then return s end
+  s = string.gsub(s, '^%s+', '')
+  s = string.gsub(s, '%s+$', '')
+  s = string.gsub(s, '[\n\r]+', ' ')
+  return s
+end
+
+local python_path = os.capture("/usr/bin/env python")
 local scripts_dir, _, _ = split_path(debug.getinfo(1).source:match("@(.*)$"))
-local python_uploader_stem = python_path.." "..scripts_dir.."flickr_upload.py "
+local python_uploader_stem = python_path.." "..scripts_dir.."flickr_upload.py"
 
-local function _flickr_storage_main(storage, image_table, extra_data)
-    
-    local untitled_images_count = 0
-    
-    for image, _ in pairs(image_table) do
-        image.blue = true
-        if image.title == '' then
-            untitled_images_count = untitled_images_count + 1
-        end
-    end
-    
-    if untitled_images_count > 0 then
-        dt.print (untitled_images_count.." images to export has no title. Aborting")
-    else
-        for image, export_file_path in pairs(image_table) do
-            local tag_composite = ""
-            for _,tag in ipairs(dt.tags.get_tags(image)) do
-                if string.sub(tag.name,1,string.len(internal_tag_prefix))~=internal_tag_prefix then
-                    tag_composite = tag_composite..'"'..tag.name..'" '
-                end
-            end
-            
-            local upload_command = python_uploader_stem.."'"..export_file_path.."' '"..image.title.."' '"..image.description.."' '"..tag_composite.."'"
-            
-            local uploadSuccess = os.execute(upload_command)
-            assert(uploadSuccess == true)
-            
-            image.blue = false
-            image.purple = true
-            dt.tags.attach(exported_flickr_tag, image)
-        end
-    end
+local function _store_image(storage, image, filename)
+  local cmd = ""
+  for _, tag in ipairs(dt.tags.get_tags(image)) do
+    cmd = cmd..'--tag "'..tag.name..'" '
+  end
+
+  if image.title then
+    cmd = cmd..'--title "'..image.title..'" '
+  else
+    filename_strip_prefix = string.match(image.filename, "^(.+)%..+$")
+    cmd = cmd..'--title "'..filename_strip_prefix..'" '
+  end
+
+  if image.description then
+    cmd = cmd..'--description "'..image.description..'" '
+  end
+
+  cmd = python_uploader_stem.." "..cmd..filename
+  --dt.control.execute(cmd)
+  return nil, cmd
 end
 
-function _flickr_storage_handler(storage, image_table, extra_data)
+function _store_handler(storage, image, format, filename, number, total, high_quality, extra_data)
+  dt.print(image.filename.." uploading")
   if (_debug) then
     --Do a regular call, which will output complete error traceback to console
-    _flickr_storage_main(storage, image_table, extra_data)
+    _store_image(storage, image, filename)
   else
-
-    local main_success, main_error = pcall(_flickr_storage_main, storage, image_table, extra_data)
-    if (not main_success) then
-      --Do two print calls, in case tostring conversion fails, user will still see a message
-      dt.print("An error prevented Flickr upload script from completing")
-      dt.print("An error prevented Flickr upload script from completing: "..tostring(main_error))
+    local success, err = pcall(_store_image, storage, image, filename)
+    if (not success) then
+      dt.print_error("Error uploading to Flickr")
+      dt.print_error("Error: "..tostring(err))
     end
   end
 end
 
-dt.register_storage("flickr_upload", "Flickr script", nil, _flickr_storage_handler)
+function _finalize_handler(storage, image_table, extra_data)
+end
+
+dt.register_storage("flickr_upload", "Flickr", _store_handler, _finalize_handler)
+
